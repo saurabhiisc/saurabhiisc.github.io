@@ -1,0 +1,219 @@
+---
+title: "Prediction Assginment Writeup"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE)
+```
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+# Data
+
+The training data for this project are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+# Objectives
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set which tells the way of exercise. In this writeup we would preprocess the data, built prediction model, do cross validation and find the accuracy of models.
+
+# Setup
+
+Initial setup includes setting libraries, setting seed and also setting parallel computing
+
+## Clear Workspace
+```{r clear}
+rm(list=ls())
+```
+
+## Libararies
+
+```{r library_load, results='hide', message=FALSE}
+library(caret)
+library(randomForest)
+library(doParallel)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+library(rattle)
+library(ggplot2)
+```
+
+## Parallel Setup
+Most popular machine learning algorithms takes a lot of time for training if data is big because hundreds of models are generated based on different combinations of sub-sample of data and data features. Therefore, if computer has multiple cores, parallel computing would greatly speed up the training.
+
+```{r library, message=FALSE, cache=FALSE}
+library(doParallel)
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+getDoParWorkers() 
+```
+
+## Set Seed
+Setting the seed for reproducibility
+
+```{r seed}
+set.seed(54321)
+```
+
+## Download and read data
+
+```{r data}
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+train_file <- "pml-training.csv"
+if(!file.exists(train_file))
+    download.file(train_url,  train_file)
+train_csv <- read.csv(train_file)
+
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+test_file <- "pml-testing.csv"
+if(!file.exists(test_file))
+    download.file(test_url,  test_file)
+test_csv <- read.csv(test_file)
+```
+
+
+# Data Cleaning and Processing
+
+```{r dimension}
+dim(train_csv)
+dim(test_csv)
+str(train_csv)
+str(test_csv)
+all.equal(colnames(test_csv[ncol(test_csv) -1]), colnames(train_csv[ncol(train_csv) -1]))
+```
+
+As we can see that test data does not have any *classe* variable meaning we don't have output for the test data. We have to predict output for test data for automatic grading.
+
+The first seven variables are of no use as they are basically identifiers of sensors data.
+
+```{r good_columns}
+train_data <- train_csv[, -(1:7)]
+test_data <- test_csv[, -(1:7)]
+```
+ 
+
+Also as seeing from *str* output, few variables have missing, *NA* or *#DIV/0!* values. We would set all of these to *NA*. Also remove columns that have over *90%* of *NA* data and/or near zero variance.
+
+```{r NA}
+train_data[train_data == ""] <- NA
+train_data[train_data == "#DIV/0!"] <- NA
+num_NA_per_column <- apply(train_data, 2, function(x) sum(is.na(x)))
+percent_NAs_per_column <- num_NA_per_column/nrow(train_data)
+train_data <- train_data[!(percent_NAs_per_column > .90)]
+zero <- nearZeroVar(train_data, saveMetrics = TRUE)
+train_data <-  train_data[!zero$nzv]
+ncol(train_data)
+```
+
+Let's have a look at all the remaining variables and frequency plot of levels of *classe* variable.
+```{r features}
+names(train_data)
+ggplot(data=train_csv, aes(classe)) + geom_bar()
+```
+
+We then split the training data in separate training and test set. The test data that was downloaded is for the final grading of the project but before that we need to test on our models on a testing set that has outputs available.
+
+```{r splitting}
+inTrain = createDataPartition(y=train_data$classe, p=0.7, list=FALSE)
+training = train_data[inTrain,]
+testing= train_data[-inTrain,]
+```
+
+```{r correlation_check}
+cindex <- findCorrelation(cor(train_data[, -53]), cutoff = 0.8)
+colnames<- names(train_data[cindex])
+colnames
+```
+
+Some variables are correlated. Below is an example plot between `r colnames[1]` and `r colnames[2]`
+
+```{r plot1}
+ggplot(data=train_data, aes_string(colnames[1], colnames[2])) + geom_point()
+```
+
+Since some variables are correlated, we would also build models with PCA as pre-processing step. 
+
+# Models
+
+## Setting control parametets. 
+
+Since this is large dataset, number of folds need not be large. Large number of folds would also increase the computation time for training. Here we have selected number of folds to be 5. Also we are using parallel backend.
+
+```{r control}
+control <- trainControl(method="cv", number = 5, allowParallel=TRUE)
+```
+
+## Random Forest
+```{r random_forest}
+modFit_rf <- train(classe ~ ., data = training, method = "rf", trControl= control)
+modFit_rf
+modFit_rf$finalModel
+plot(modFit_rf, main="Accuracy vs Number of Selected Predictors")
+```
+
+As you can see that OOB estimate is very low. Let us see that variable importance also.
+
+```{r rf_importan_variables}
+varImp(modFit_rf)
+```
+
+
+### Test set accuracy
+The model is used to predict output of test set. 
+```{r rf_test_predictions}
+predictions_rf <- predict(modFit_rf, testing)
+cm_rf <- confusionMatrix(predictions_rf, testing$classe)
+cm_rf
+out_of_sample_error_rf <- 1 - cm_rf$overall[[1]]
+out_of_sample_error_rf
+```
+
+As we can see, out of sample error is just `r out_of_sample_error_rf` which is very good.
+
+
+## Random Forest with PCA
+```{r random_forest_with_pca}
+modFit_pca_rf <- train(classe ~ ., data = training, method = "rf", preProcess = "pca", trControl= control)
+stopCluster(cl)
+modFit_pca_rf
+modFit_pca_rf$finalModel
+modFit_pca_rf$preProcess
+plot(modFit_pca_rf, main="Accuracy vs Number of Selected Predictors")
+```
+
+Again OOB estimate very low. Also `r modFit_pca_rf$preProcess$numComp` principal components are needed to capture *95%* of variance. Let us see the relative importance of principal components. 
+
+```{r pca_rf_important_variables}
+varImp(modFit_pca_rf)
+```
+
+
+### Test set accuracy
+
+The model is used to predict output of test set. 
+```{r pca_rf_test_predictions}
+predictions_pca_rf <- predict(modFit_pca_rf, testing)
+cm_pca_rf <- confusionMatrix(predictions_pca_rf, testing$classe)
+cm_pca_rf
+out_of_sample_error_pca_rf <- 1 - cm_pca_rf$overall[[1]]
+```
+
+As we can see, expected out of sample error is `r out_of_sample_error_pca_rf` which is very good and close to previous model. Also Sensitivity and Specificity is very close to previous model. But if we have to choose a single model, we would choose random forest without PCA as that gave slightly lower out of sample error.
+
+
+## Predictions on 20 new test cases 
+```{r final_predictions}
+predict(modFit_rf, test_data)
+predict(modFit_pca_rf, test_data)
+```
+
+# Summary
+The Weight Lifting Exercises Dataset had `r nrow(train_data)` observations. Since the data is big, there was no problem in splitting it into training and test set. There were lot of missing values and those features that have more than 90% of missing values are removed. Random Forests were used as prediction model. Correlation analysis showed that some of the variable were correlated. So additional Random Forest model was built after doing pre-processing with PCA. The best results were given by Random Forest with an accuracy of over 99%. The models were also tried on 20 different test cases and they all gave same result for both models.  
